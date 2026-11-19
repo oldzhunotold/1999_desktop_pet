@@ -14,22 +14,7 @@
 ## 环境
 - Windows 10 / 11
 - Python 3.10 及以上
-- PySide6
-
-assets/
-└─ <角色目录>/
-   ├─ <服装目录>/
-   │  ├─ idle.webp       # 必需
-   │  ├─ born.webp       # 登场动画
-   │  ├─ hit.webp        # 点击
-   │  ├─ sleep.webp      # 睡觉
-   │  ├─ posture.webp    # 抓握姿态
-   │  └─ skill1.webp ... # 其他动作
-   ├─ lines.txt          # 台词，一行一段
-   ├─ debut.txt          # 登场台词（可选，一行）
-   └─ first_meet.txt     # 初遇台词（可选，只念一次）
-
-
+- PySide6  
 动作名就是文件名，新增动作不用改代码
 lines.txt 支持任意段数，程序会自动按宽度切成 1–2 行一段
 没有 debut.txt / first_meet.txt 就不念，不会报错
