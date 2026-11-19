@@ -23,7 +23,7 @@ lines.txt 支持任意段数，程序会自动按宽度切成 1–2 行一段
 改气泡宽度、行数：BUBBLE_W、MAX_LINES
 改窗口大小：main_qmovie.py 的 SCALE
 改菜单显示名：CHAR_LABELS、OUTFIT_LABELS
-##特别感谢
+## 特别感谢
 感谢https://uttu.merui.net/的素材提供
 感谢1999wiki的文案提供
 
