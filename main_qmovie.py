@@ -11,14 +11,105 @@ import os
 import random
 import sys
 
+import autostart
+import bubble as bubble_mod
+import settings_ui
+
 from PySide6.QtCore import QPoint, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QIcon, QImageReader, QMovie, QPixmap
 from PySide6.QtWidgets import QApplication, QLabel, QMenu, QSystemTrayIcon, QWidget
 
 from bubble import Bubble, BUBBLE_W, PAD, MAX_LINES, _wrap
 
-BASE = os.path.dirname(os.path.abspath(__file__))
+try:
+    import ctypes
+    from ctypes import wintypes
+
+    _user32 = ctypes.windll.user32
+except Exception:
+    _user32 = None
+
+
+def _cursor_hidden() -> bool:
+    if _user32 is None:
+        return False
+
+    class CURSORINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("flags", wintypes.DWORD),
+            ("hCursor", wintypes.HANDLE),
+            ("ptScreenPos", wintypes.POINT),
+        ]
+
+    ci = CURSORINFO()
+    ci.cbSize = ctypes.sizeof(ci)
+    if not _user32.GetCursorInfo(ctypes.byref(ci)):
+        return False
+    return not (ci.flags & 0x00000001)
+
+
+def _foreground_fullscreen(own_hwnd: int) -> bool:
+    if _user32 is None:
+        return False
+    hwnd = int(_user32.GetForegroundWindow() or 0)
+    if not hwnd or hwnd == own_hwnd:
+        return False
+
+    class RECT(ctypes.Structure):
+        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                    ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("rcMonitor", RECT),
+            ("rcWork", RECT),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
+    rect = RECT()
+    if not _user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return False
+    hmon = _user32.MonitorFromWindow(hwnd, 2)
+    if not hmon:
+        return False
+    mi = MONITORINFO()
+    mi.cbSize = ctypes.sizeof(mi)
+    if not _user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+        return False
+    m = mi.rcMonitor
+    return (
+        rect.left <= m.left
+        and rect.top <= m.top
+        and rect.right >= m.right
+        and rect.bottom >= m.bottom
+    )
+
+
+def find_base():
+    """兼容开发环境与 PyInstaller 打包（onedir / onefile）。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = []
+    if getattr(sys, "frozen", False):
+        candidates.append(os.path.dirname(sys.executable))
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            candidates.append(meipass)
+    candidates.append(here)
+    for c in candidates:
+        if c and os.path.isdir(os.path.join(c, "assets")):
+            return c
+    return here
+
+
+BASE = find_base()
 ASSET_ROOT = os.path.join(BASE, "assets")
+APP_ICON_PATH = os.path.join(BASE, "1999_desktop_pet.ico")
+
+
+def app_icon():
+    return QIcon(APP_ICON_PATH) if os.path.isfile(APP_ICON_PATH) else QIcon()
 DEFAULT_CHAR = "菲林士多"
 DEFAULT_OUTFIT = "Default"
 
@@ -30,7 +121,7 @@ def list_outfits(char):
         return []
     return sorted(
         d for d in os.listdir(base)
-        if os.path.isfile(os.path.join(base, d, "idle.webp"))
+        if os.path.isfile(os.path.join(base, d, "idle.webp")) or os.path.isfile(os.path.join(base, d, "idle_special.webp"))
     )
 
 
@@ -77,8 +168,23 @@ IDLE_SHOW_MS = 90 * 1000
 # 自动睡觉开关：关掉后不会自己睡，只能右键「睡觉」手动睡
 AUTO_SLEEP = False
 
+SETTINGS_PATH = os.path.join(BASE, "settings.json")
+SETTINGS = settings_ui.load(SETTINGS_PATH)
+SCALE = float(SETTINGS.get("scale", SCALE))
+IDLE_SLEEP_MS = int(SETTINGS.get("sleep_minutes", 3)) * 60 * 1000
+IDLE_SHOW_MS = int(SETTINGS.get("show_seconds", 90)) * 1000
+AUTO_SLEEP = bool(SETTINGS.get("auto_sleep", False))
+bubble_mod.CHAR_MS = int(SETTINGS.get("char_ms", bubble_mod.CHAR_MS))
+bubble_mod.HOLD_MS = int(SETTINGS.get("hold_ms", bubble_mod.HOLD_MS))
+
 # 动作配置：循环的、其余都当单次播
 LOOP_ACTIONS = {"idle", "sleep", "posture"}
+IDLE_SPECIAL_WEIGHT = 2  # idle_special 在随机表演里的额外权重
+
+ALWAYS_ON_TOP = bool(SETTINGS.get("always_on_top", True))
+HIDE_FULLSCREEN = bool(SETTINGS.get("hide_fullscreen", True))
+CLICK_THROUGH_HIDDEN = bool(SETTINGS.get("click_through_hidden_cursor", True))
+ALLOW_CROSS_SCREEN = bool(SETTINGS.get("allow_cross_screen", False))
 CHAR_LABELS = {
     "noire": "菲林士多",
     "marcus": "马库斯",
@@ -95,6 +201,11 @@ CHAR_LABELS = {
     "lucy":"露西女士",
     "ulrich":"乌尔里希",
     "cheng_heguang":"程和光",
+    "schneider":"斯奈德",
+    "recoleta":"虚构集",
+    "sentinel":"玛丽安娜",
+    "jiu_niangzi":"曲娘",
+    "":""
 
 
 
@@ -132,7 +243,15 @@ OUTFIT_LABELS = {
     "Universe_in_the_tank":"缸中宇宙",
     "A_glimpse_of_the_cosmos": "叩响天宇一角",
     "Breaking_free_from_a_burning_cage":"檐外鹭",
-    "The_third_second":"第三秒"
+    "The_third_second":"第三秒",
+    "foreword":"卷首语",
+    "The_knight_of_la_mancha":"拉曼却幻想",
+    "The_weight_of_words":"文字，自始至终",
+    "The_shackles_of_sin":"孽的锁链",
+    "By_reflections_witnessed":"镜廊宣言",
+    "Weighing_sin_and_justice":"称量罪与理",
+    "Let_there_be_a_way_out":"天光照衣",
+    "Blossom_spring_fairy":"壁上桃源",
 }
 ACTION_LABELS = {
     "sleep": "睡觉",
@@ -219,10 +338,12 @@ class Pet(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_NoSystemBackground)
         self.movies = {}
-        self.char = resolve_char(DEFAULT_CHAR)
+        self.char = resolve_char(SETTINGS.get("initial_char") or DEFAULT_CHAR)
         if not self.char:
             raise SystemExit("assets 下没有找到带服装目录的角色")
-        self.outfit = resolve_outfit(self.char, DEFAULT_OUTFIT)
+        self.outfit = resolve_outfit(
+            self.char, SETTINGS.get("initial_outfit") or DEFAULT_OUTFIT
+        )
         self.asset_dir = os.path.join(ASSET_ROOT, self.char, self.outfit)
         self.setWindowTitle(f"1999 桌宠 · {char_label(self.char)}")
 
@@ -233,6 +354,10 @@ class Pet(QWidget):
         self.label.setScaledContents(True)
 
         self.bubble = Bubble(self)
+        icon = app_icon()
+        if not icon.isNull():
+            self.setWindowIcon(icon)
+            QApplication.setWindowIcon(icon)
         self._spawn_from_switch = False
         self._talk_queue = []
         self._lines_pool = []
@@ -269,6 +394,21 @@ class Pet(QWidget):
         self.show_timer.start(IDLE_SHOW_MS)
 
         self._make_tray()
+        if not ALWAYS_ON_TOP:
+            self.setWindowFlag(Qt.WindowStaysOnTopHint, False)
+            self.show()
+        self._hidden_by_fullscreen = False
+        self._drag_screen = None
+        self._fs_timer = QTimer(self)
+        self._fs_timer.setInterval(1000)
+        self._fs_timer.timeout.connect(self._check_fullscreen)
+        if HIDE_FULLSCREEN:
+            self._fs_timer.start()
+        self._cursor_timer = QTimer(self)
+        self._cursor_timer.setInterval(200)
+        self._cursor_timer.timeout.connect(self._check_cursor)
+        if CLICK_THROUGH_HIDDEN:
+            self._cursor_timer.start()
         if "born" in self.movies:
             self.play("born", oneshot=True)   # 先登场，播完自动回 idle
         else:
@@ -326,7 +466,7 @@ class Pet(QWidget):
                         f.write("1")
                 except Exception:
                     pass
-            elif getattr(self, "_spawn_from_switch", False) and getattr(self, "_debut", ""):
+            elif getattr(self, "_debut", ""):
                 text = self._debut
             if text:
                 self._talk_queue = _split_paragraph(text, self.bubble.fm, BUBBLE_W - PAD * 2)
@@ -359,8 +499,12 @@ class Pet(QWidget):
         if not candidates:
             self._schedule_show()
             return
+        # idle_special 作为“待机特殊动作”，出现概率稍高
+        pool = list(candidates)
+        if "idle_special" in pool:
+            pool += ["idle_special"] * IDLE_SPECIAL_WEIGHT
         self._show_running = True
-        self.play(random.choice(candidates), oneshot=True)
+        self.play(random.choice(pool), oneshot=True)
         self._queue_talk(2)
 
     # ---------- 台词 ----------
@@ -463,6 +607,14 @@ class Pet(QWidget):
             m.frameChanged.connect(lambda f, n=name: self._on_movie_frame(n, f))
             self.movies[name] = m
         if "idle" not in self.movies:
+            alt = os.path.join(self.asset_dir, "idle_special.webp")
+            if os.path.isfile(alt) and os.path.getsize(alt) > 0:
+                m = QMovie(alt)
+                m.setCacheMode(QMovie.CacheAll)
+                m.finished.connect(lambda n="idle": self._on_movie_finished(n))
+                m.frameChanged.connect(lambda f, n="idle": self._on_movie_frame(n, f))
+                self.movies["idle"] = m
+        if "idle" not in self.movies:
             raise SystemExit(f"找不到素材：{os.path.join(self.asset_dir, 'idle.webp')}")
 
     def _reload_assets(self):
@@ -521,6 +673,7 @@ class Pet(QWidget):
             if "posture" in self.movies:
                 self.play("posture")
             self._press_pos = event.globalPosition().toPoint()
+            self._drag_screen = self.screen()
             self._dragging = False
             event.accept()
 
@@ -530,7 +683,16 @@ class Pet(QWidget):
             if not self._dragging and (pos - self._press_pos).manhattanLength() > 6:
                 self._dragging = True
             if self._dragging:
-                self.move(self.pos() + pos - self._press_pos)
+                new_pos = self.pos() + pos - self._press_pos
+                if not ALLOW_CROSS_SCREEN and self._drag_screen is not None:
+                    area = self._drag_screen.availableGeometry()
+                    new_pos.setX(
+                        max(area.left(), min(new_pos.x(), area.right() - self.width()))
+                    )
+                    new_pos.setY(
+                        max(area.top(), min(new_pos.y(), area.bottom() - self.height()))
+                    )
+                self.move(new_pos)
                 self._press_pos = pos
                 self.idle_timer.start(IDLE_SLEEP_MS)
                 event.accept()
@@ -547,8 +709,12 @@ class Pet(QWidget):
 
     # ---------- 托盘 ----------
     def _make_tray(self):
-        icon = QPixmap(os.path.join(self.asset_dir, "idle.webp"))
-        self.tray = QSystemTrayIcon(QIcon(icon), self)
+        tray_icon = app_icon()
+        if not tray_icon.isNull():
+            pass
+        else:
+            tray_icon = QIcon(QPixmap(os.path.join(self.asset_dir, "idle.webp")))
+        self.tray = QSystemTrayIcon(tray_icon, self)
         menu = QMenu()
         act_show = QAction("显示 / 隐藏", self)
         act_show.triggered.connect(lambda: self.setVisible(not self.isVisible()))
@@ -601,10 +767,120 @@ class Pet(QWidget):
             action_menu.addAction(act)
 
         menu.addSeparator()
+        act_settings = QAction("设置…", self)
+        act_settings.triggered.connect(self._open_settings)
+        menu.addAction(act_settings)
         act_quit = QAction("退出", self)
         act_quit.triggered.connect(QApplication.quit)
         menu.addAction(act_quit)
         menu.exec(event.globalPos())
+
+    # ---------- 窗口行为 ----------
+    def _check_fullscreen(self):
+        if not HIDE_FULLSCREEN or self._dragging or self.isHidden():
+            return
+        try:
+            fs = _foreground_fullscreen(int(self.winId()))
+        except Exception:
+            fs = False
+        if fs and not self._hidden_by_fullscreen:
+            self._hidden_by_fullscreen = True
+            self.hide()
+        elif not fs and self._hidden_by_fullscreen:
+            self._hidden_by_fullscreen = False
+            self.show()
+
+    def _check_cursor(self):
+        if not CLICK_THROUGH_HIDDEN:
+            if self.testAttribute(Qt.WA_TransparentForMouseEvents):
+                self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+            return
+        hidden = _cursor_hidden()
+        if self.testAttribute(Qt.WA_TransparentForMouseEvents) != hidden:
+            self.setAttribute(Qt.WA_TransparentForMouseEvents, hidden)
+
+    # ---------- 设置 ----------
+    def _open_settings(self):
+        dlg = getattr(self, "_settings_dlg", None)
+        if dlg is not None and dlg.isVisible():
+            dlg.raise_()
+            dlg.activateWindow()
+            return
+        chars = list_characters()
+        choices = {
+            "characters": [(c, char_label(c)) for c in chars],
+            "outfits": {
+                c: [(o, outfit_label(o)) for o in list_outfits(c)] for c in chars
+            },
+        }
+        self._settings_dlg = settings_ui.SettingsDialog(
+            self, SETTINGS, self._apply_settings, choices
+        )
+        self._settings_dlg.show()
+
+    def _apply_settings(self, data: dict):
+        global SCALE, AUTO_SLEEP, IDLE_SLEEP_MS, IDLE_SHOW_MS
+        SETTINGS.update(data)
+        settings_ui.save(SETTINGS_PATH, SETTINGS)
+        SCALE = float(data.get("scale", SCALE))
+        bubble_mod.CHAR_MS = int(data.get("char_ms", bubble_mod.CHAR_MS))
+        bubble_mod.HOLD_MS = int(data.get("hold_ms", bubble_mod.HOLD_MS))
+        IDLE_SLEEP_MS = int(data.get("sleep_minutes", 3)) * 60 * 1000
+        IDLE_SHOW_MS = int(data.get("show_seconds", 90)) * 1000
+        AUTO_SLEEP = bool(data.get("auto_sleep", False))
+        if "autostart" in data:
+            autostart.set_enabled(bool(data["autostart"]))
+        if "always_on_top" in data:
+            global ALWAYS_ON_TOP
+            ALWAYS_ON_TOP = bool(data["always_on_top"])
+            self.setWindowFlag(Qt.WindowStaysOnTopHint, ALWAYS_ON_TOP)
+            self.show()
+        if "hide_fullscreen" in data:
+            global HIDE_FULLSCREEN
+            HIDE_FULLSCREEN = bool(data["hide_fullscreen"])
+            if HIDE_FULLSCREEN:
+                self._fs_timer.start()
+            else:
+                self._fs_timer.stop()
+                if self._hidden_by_fullscreen:
+                    self._hidden_by_fullscreen = False
+                    self.show()
+        if "click_through_hidden_cursor" in data:
+            global CLICK_THROUGH_HIDDEN
+            CLICK_THROUGH_HIDDEN = bool(data["click_through_hidden_cursor"])
+            if CLICK_THROUGH_HIDDEN:
+                self._cursor_timer.start()
+            else:
+                self._cursor_timer.stop()
+                self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        if "allow_cross_screen" in data:
+            global ALLOW_CROSS_SCREEN
+            ALLOW_CROSS_SCREEN = bool(data["allow_cross_screen"])
+        # 初始桌宠：立即切换
+        new_char = data.get("initial_char") or ""
+        new_outfit = data.get("initial_outfit") or ""
+        if new_char and new_char != self.char:
+            self._switch_char(new_char)
+        if new_outfit and new_outfit != self.outfit:
+            self._switch_outfit(new_outfit)
+        # 立即应用缩放
+        reader = QImageReader(os.path.join(self.asset_dir, "idle.webp"))
+        sz = reader.size()
+        if sz.isValid():
+            w = max(1, int(sz.width() * SCALE))
+            h = max(1, int(sz.height() * SCALE))
+            self.setFixedSize(w, h)
+            self.label.setFixedSize(w, h)
+        # 自动表演
+        if IDLE_SHOW_MS > 0:
+            self._schedule_show()
+        else:
+            self.show_timer.stop()
+        # 自动睡觉
+        if AUTO_SLEEP:
+            self.idle_timer.start(IDLE_SLEEP_MS)
+        else:
+            self.idle_timer.stop()
 
     def _go_sleep(self):
         if "sleep" in self.movies:
