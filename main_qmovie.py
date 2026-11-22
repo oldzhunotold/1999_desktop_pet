@@ -777,18 +777,22 @@ class Pet(QWidget):
 
     # ---------- 窗口行为 ----------
     def _check_fullscreen(self):
-        if not HIDE_FULLSCREEN or self._dragging or self.isHidden():
+        if not HIDE_FULLSCREEN or self._dragging:
             return
         try:
             fs = _foreground_fullscreen(int(self.winId()))
         except Exception:
             fs = False
-        if fs and not self._hidden_by_fullscreen:
-            self._hidden_by_fullscreen = True
-            self.hide()
-        elif not fs and self._hidden_by_fullscreen:
-            self._hidden_by_fullscreen = False
-            self.show()
+        if fs:
+            # 只在可见时因全屏而隐藏，避免把用户手动隐藏的状态改掉
+            if self.isVisible() and not self._hidden_by_fullscreen:
+                self._hidden_by_fullscreen = True
+                self.hide()
+        else:
+            # 之前是被全屏藏起来的，退出全屏就恢复
+            if self._hidden_by_fullscreen:
+                self._hidden_by_fullscreen = False
+                self.show()
 
     def _check_cursor(self):
         if not CLICK_THROUGH_HIDDEN:
