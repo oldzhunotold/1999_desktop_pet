@@ -30,11 +30,13 @@ DEFAULTS = {
     "show_seconds": 90,
     "auto_sleep": False,
     "sleep_minutes": 3,
+    "wake_minutes": 10,
     "autostart": False,
     "always_on_top": True,
     "hide_fullscreen": True,
     "click_through_hidden_cursor": True,
     "allow_cross_screen": False,
+    "allow_offscreen": True,
     "initial_char": "",
     "initial_outfit": "",
 }
@@ -194,7 +196,9 @@ class ToggleSwitch(QCheckBox):
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, parent, values: dict, on_apply, choices=None):
+    def __init__(
+        self, parent, values: dict, on_apply, choices=None, on_import=None
+    ):
         super().__init__(parent)
         self.setWindowTitle("桌宠设置")
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
@@ -203,6 +207,7 @@ class SettingsDialog(QDialog):
         self.setStyleSheet(STYLE)
         self._on_apply = on_apply
         self._choices = choices or {}
+        self._on_import = on_import
         self._drag = None
         self._title_h = 44
 
@@ -323,6 +328,21 @@ class SettingsDialog(QDialog):
         self.cross_screen = ToggleSwitch()
         self.cross_screen.setChecked(bool(values.get("allow_cross_screen", False)))
         ch.addWidget(self.cross_screen)
+        off_box = QWidget()
+        oh = QHBoxLayout(off_box)
+        oh.setContentsMargins(0, 0, 0, 0)
+        oh.addStretch(1)
+        self.allow_offscreen = ToggleSwitch()
+        self.allow_offscreen.setChecked(bool(values.get("allow_offscreen", True)))
+        oh.addWidget(self.allow_offscreen)
+        v.addWidget(
+            _row(
+                "允许移出屏幕",
+                "可以把桌宠拖到屏幕边缘外，至少保留一小块可见。",
+                off_box,
+            )
+        )
+
         v.addWidget(
             _row(
                 "允许桌宠跨屏",
@@ -364,6 +384,10 @@ class SettingsDialog(QDialog):
         self._refresh_outfits(values.get("initial_outfit") or "")
         self.char_combo.currentIndexChanged.connect(self._on_char_changed)
         self.outfit_combo.currentIndexChanged.connect(self._autosave_pet)
+
+        self.btn_import = QPushButton("导入角色…")
+        self.btn_import.clicked.connect(self._do_import)
+        v.addWidget(_row("导入角色", "导入自己准备的角色素材（文件夹或 zip）。", self.btn_import))
 
         v.addWidget(_row("初始角色", "启动桌宠时显示哪个角色。", self.char_combo))
         v.addWidget(_row("初始服装", "该角色启动时穿哪套衣服。", self.outfit_combo))
@@ -425,6 +449,12 @@ class SettingsDialog(QDialog):
         self.sleep_minutes.setValue(int(values.get("sleep_minutes", 3)))
         v.addWidget(_row("多久后睡觉", "多久没有互动后入睡。", self.sleep_minutes))
 
+        self.wake_minutes = QSpinBox()
+        self.wake_minutes.setRange(1, 240)
+        self.wake_minutes.setSuffix(" 分钟")
+        self.wake_minutes.setValue(int(values.get("wake_minutes", 10)))
+        v.addWidget(_row("睡多久醒来", "睡够这么久会自己醒来，回到待机。", self.wake_minutes))
+
         v.addStretch(1)
         self.stack.addWidget(page)
 
@@ -464,6 +494,10 @@ class SettingsDialog(QDialog):
         self._drag = None
         super().mouseReleaseEvent(event)
 
+    def _do_import(self):
+        if self._on_import:
+            self._on_import(self)
+
     def _on_char_changed(self, _index: int = 0):
         self._refresh_outfits("")
         self._autosave_pet()
@@ -498,11 +532,13 @@ class SettingsDialog(QDialog):
             "show_seconds": self.show_seconds.value(),
             "auto_sleep": self.auto_sleep.isChecked(),
             "sleep_minutes": self.sleep_minutes.value(),
+            "wake_minutes": self.wake_minutes.value(),
             "autostart": self.autostart.isChecked(),
             "always_on_top": self.always_on_top.isChecked(),
             "hide_fullscreen": self.hide_fullscreen.isChecked(),
             "click_through_hidden_cursor": self.click_through.isChecked(),
             "allow_cross_screen": self.cross_screen.isChecked(),
+            "allow_offscreen": self.allow_offscreen.isChecked(),
             "initial_char": self.char_combo.currentData() or "",
             "initial_outfit": self.outfit_combo.currentData() or "",
         }
@@ -518,7 +554,9 @@ class SettingsDialog(QDialog):
         self.hide_fullscreen.setChecked(DEFAULTS["hide_fullscreen"])
         self.click_through.setChecked(DEFAULTS["click_through_hidden_cursor"])
         self.cross_screen.setChecked(DEFAULTS["allow_cross_screen"])
+        self.allow_offscreen.setChecked(DEFAULTS["allow_offscreen"])
         self.sleep_minutes.setValue(DEFAULTS["sleep_minutes"])
+        self.wake_minutes.setValue(DEFAULTS["wake_minutes"])
 
     def accept(self):
         self._on_apply(self._collect())

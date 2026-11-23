@@ -7,17 +7,26 @@
 素材放在 assets/noire/*.webp（idle / hit / sleep / born / special / skill1 / skill2）。
 """
 
+import json
 import os
 import random
 import sys
 
 import autostart
 import bubble as bubble_mod
+import importer
 import settings_ui
 
 from PySide6.QtCore import QPoint, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QIcon, QImageReader, QMovie, QPixmap
-from PySide6.QtWidgets import QApplication, QLabel, QMenu, QSystemTrayIcon, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QLabel,
+    QMenu,
+    QSystemTrayIcon,
+    QWidget,
+)
 
 from bubble import Bubble, BUBBLE_W, PAD, MAX_LINES, _wrap
 
@@ -174,6 +183,7 @@ SCALE = float(SETTINGS.get("scale", SCALE))
 IDLE_SLEEP_MS = int(SETTINGS.get("sleep_minutes", 3)) * 60 * 1000
 IDLE_SHOW_MS = int(SETTINGS.get("show_seconds", 90)) * 1000
 AUTO_SLEEP = bool(SETTINGS.get("auto_sleep", False))
+WAKE_MS = int(SETTINGS.get("wake_minutes", 10)) * 60 * 1000
 bubble_mod.CHAR_MS = int(SETTINGS.get("char_ms", bubble_mod.CHAR_MS))
 bubble_mod.HOLD_MS = int(SETTINGS.get("hold_ms", bubble_mod.HOLD_MS))
 
@@ -185,6 +195,7 @@ ALWAYS_ON_TOP = bool(SETTINGS.get("always_on_top", True))
 HIDE_FULLSCREEN = bool(SETTINGS.get("hide_fullscreen", True))
 CLICK_THROUGH_HIDDEN = bool(SETTINGS.get("click_through_hidden_cursor", True))
 ALLOW_CROSS_SCREEN = bool(SETTINGS.get("allow_cross_screen", False))
+ALLOW_OFFSCREEN = bool(SETTINGS.get("allow_offscreen", True))
 CHAR_LABELS = {
     "noire": "菲林士多",
     "marcus": "马库斯",
@@ -205,11 +216,9 @@ CHAR_LABELS = {
     "recoleta":"虚构集",
     "sentinel":"玛丽安娜",
     "jiu_niangzi":"曲娘",
-    "":""
-
-
-
-
+    "isolde":"伊索尔德",
+    "kakania":"卡卡尼亚",
+    "windsong":"北方哨歌",
 }
 OUTFIT_LABELS = {
     "Default": "默认",
@@ -252,6 +261,17 @@ OUTFIT_LABELS = {
     "Weighing_sin_and_justice":"称量罪与理",
     "Let_there_be_a_way_out":"天光照衣",
     "Blossom_spring_fairy":"壁上桃源",
+    "Polyphony":"多重唱",
+    "And_all_that_jazz":"爵士春秋",
+    "The_last_fluttering_beat":"若向死振翅",
+    "Reflections_within_reflections":"映像之映像",
+    "Seminars_on_serenity":"心曲沙龙",
+    "Guardian_of_the_broken":"时代病陪护",
+    "The_gourmet_counselor":"镜中上校",
+    "Measuring_the_world":"于此丈量",
+    "Records_from_the_jade_hunt":"凿玉记",
+    "The_nightmare's_trespasser":"魇与夜",
+    "Silver_isoheight":"银色等高线",
 }
 ACTION_LABELS = {
     "sleep": "睡觉",
@@ -265,12 +285,30 @@ ACTION_LABELS = {
 }
 
 
+def _meta_label(path: str) -> str:
+    try:
+        with open(os.path.join(path, "char.json"), "r", encoding="utf-8") as f:
+            return (json.load(f).get("label") or "").strip()
+    except Exception:
+        return ""
+
+
+def _outfit_meta_label(path: str) -> str:
+    try:
+        with open(os.path.join(path, "meta.json"), "r", encoding="utf-8") as f:
+            return (json.load(f).get("label") or "").strip()
+    except Exception:
+        return ""
+
+
 def char_label(name: str) -> str:
-    return CHAR_LABELS.get(name, name)
+    return _meta_label(os.path.join(ASSET_ROOT, name)) or CHAR_LABELS.get(name, name)
 
 
-def outfit_label(name: str) -> str:
-    return OUTFIT_LABELS.get(name, name)
+def outfit_label(char: str, name: str) -> str:
+    return _outfit_meta_label(
+        os.path.join(ASSET_ROOT, char, name)
+    ) or OUTFIT_LABELS.get(name, name)
 
 
 def action_label(name: str) -> str:
@@ -387,11 +425,16 @@ class Pet(QWidget):
         if AUTO_SLEEP:
             self.idle_timer.start(IDLE_SLEEP_MS)
 
+        self.wake_timer = QTimer(self)
+        self.wake_timer.setSingleShot(True)
+        self.wake_timer.timeout.connect(self._wake_from_sleep)
+
         self._show_running = False
         self.show_timer = QTimer(self)
         self.show_timer.setSingleShot(True)
         self.show_timer.timeout.connect(self._maybe_show)
-        self.show_timer.start(IDLE_SHOW_MS)
+        if IDLE_SHOW_MS > 0:
+            self.show_timer.start(IDLE_SHOW_MS)
 
         self._make_tray()
         if not ALWAYS_ON_TOP:
@@ -480,6 +523,8 @@ class Pet(QWidget):
 
     # ---------- 自己动一下 ----------
     def _schedule_show(self):
+        if IDLE_SHOW_MS <= 0:
+            return
         self.show_timer.start(IDLE_SHOW_MS)
 
     def _maybe_show(self):
@@ -581,8 +626,17 @@ class Pet(QWidget):
             self.idle_timer.stop()
             self.show_timer.stop()
             self.play("sleep")
+            self.wake_timer.start(WAKE_MS)
+
+    def _wake_from_sleep(self):
+        if self.current_name == "sleep":
+            self.play("idle")
+            self._schedule_show()
+        if AUTO_SLEEP:
+            self.idle_timer.start(IDLE_SLEEP_MS)
 
     def _wake(self):
+        self.wake_timer.stop()
         if self.current_name == "sleep":
             self.play("idle")
         if AUTO_SLEEP:
@@ -686,12 +740,27 @@ class Pet(QWidget):
                 new_pos = self.pos() + pos - self._press_pos
                 if not ALLOW_CROSS_SCREEN and self._drag_screen is not None:
                     area = self._drag_screen.availableGeometry()
-                    new_pos.setX(
-                        max(area.left(), min(new_pos.x(), area.right() - self.width()))
-                    )
-                    new_pos.setY(
-                        max(area.top(), min(new_pos.y(), area.bottom() - self.height()))
-                    )
+                    if ALLOW_OFFSCREEN:
+                        margin = 40
+                        new_pos.setX(
+                            max(
+                                area.left() - self.width() + margin,
+                                min(new_pos.x(), area.right() - margin),
+                            )
+                        )
+                        new_pos.setY(
+                            max(
+                                area.top() - self.height() + margin,
+                                min(new_pos.y(), area.bottom() - margin),
+                            )
+                        )
+                    else:
+                        new_pos.setX(
+                            max(area.left(), min(new_pos.x(), area.right() - self.width()))
+                        )
+                        new_pos.setY(
+                            max(area.top(), min(new_pos.y(), area.bottom() - self.height()))
+                        )
                 self.move(new_pos)
                 self._press_pos = pos
                 self.idle_timer.start(IDLE_SLEEP_MS)
@@ -748,7 +817,9 @@ class Pet(QWidget):
         outfits = list_outfits(self.char)
         outfit_menu = menu.addMenu("更换服装")
         for o in outfits:
-            act = QAction(outfit_label(o) + (" ✓" if o == self.outfit else ""), self)
+            act = QAction(
+                outfit_label(self.char, o) + (" ✓" if o == self.outfit else ""), self
+            )
             act.triggered.connect(lambda _=False, n=o: self._switch_outfit(n))
             outfit_menu.addAction(act)
         if not outfits:
@@ -762,7 +833,7 @@ class Pet(QWidget):
         for name in names:
             act = QAction(action_label(name), self)
             act.triggered.connect(
-                lambda _=False, n=name: self.play(n, oneshot=(n not in LOOP_ACTIONS))
+                lambda _=False, n=name: self._play_action(n)
             )
             action_menu.addAction(act)
 
@@ -776,6 +847,11 @@ class Pet(QWidget):
         menu.exec(event.globalPos())
 
     # ---------- 窗口行为 ----------
+    def _play_action(self, name: str):
+        self.play(name, oneshot=(name not in LOOP_ACTIONS))
+        if name == "sleep":
+            self.wake_timer.start(WAKE_MS)
+
     def _check_fullscreen(self):
         if not HIDE_FULLSCREEN or self._dragging:
             return
@@ -804,6 +880,15 @@ class Pet(QWidget):
             self.setAttribute(Qt.WA_TransparentForMouseEvents, hidden)
 
     # ---------- 设置 ----------
+    def _import_character(self, parent):
+        known = {char_label(c): c for c in list_characters()}
+        dlg = importer.ImportDialog(parent, ASSET_ROOT, known)
+        if dlg.exec() == QDialog.Accepted and dlg.result_dir:
+            folder = os.path.basename(dlg.result_dir)
+            self._switch_char(folder)
+            return folder
+        return ""
+
     def _open_settings(self):
         dlg = getattr(self, "_settings_dlg", None)
         if dlg is not None and dlg.isVisible():
@@ -814,11 +899,11 @@ class Pet(QWidget):
         choices = {
             "characters": [(c, char_label(c)) for c in chars],
             "outfits": {
-                c: [(o, outfit_label(o)) for o in list_outfits(c)] for c in chars
+                c: [(o, outfit_label(c, o)) for o in list_outfits(c)] for c in chars
             },
         }
         self._settings_dlg = settings_ui.SettingsDialog(
-            self, SETTINGS, self._apply_settings, choices
+            self, SETTINGS, self._apply_settings, choices, self._import_character
         )
         self._settings_dlg.show()
 
@@ -832,13 +917,16 @@ class Pet(QWidget):
         IDLE_SLEEP_MS = int(data.get("sleep_minutes", 3)) * 60 * 1000
         IDLE_SHOW_MS = int(data.get("show_seconds", 90)) * 1000
         AUTO_SLEEP = bool(data.get("auto_sleep", False))
+        global WAKE_MS
+        WAKE_MS = int(data.get("wake_minutes", 10)) * 60 * 1000
         if "autostart" in data:
             autostart.set_enabled(bool(data["autostart"]))
         if "always_on_top" in data:
             global ALWAYS_ON_TOP
             ALWAYS_ON_TOP = bool(data["always_on_top"])
             self.setWindowFlag(Qt.WindowStaysOnTopHint, ALWAYS_ON_TOP)
-            self.show()
+            if not self.isHidden():
+                self.show()
         if "hide_fullscreen" in data:
             global HIDE_FULLSCREEN
             HIDE_FULLSCREEN = bool(data["hide_fullscreen"])
@@ -860,6 +948,9 @@ class Pet(QWidget):
         if "allow_cross_screen" in data:
             global ALLOW_CROSS_SCREEN
             ALLOW_CROSS_SCREEN = bool(data["allow_cross_screen"])
+        if "allow_offscreen" in data:
+            global ALLOW_OFFSCREEN
+            ALLOW_OFFSCREEN = bool(data["allow_offscreen"])
         # 初始桌宠：立即切换
         new_char = data.get("initial_char") or ""
         new_outfit = data.get("initial_outfit") or ""
