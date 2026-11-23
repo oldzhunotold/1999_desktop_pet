@@ -41,7 +41,7 @@ DEFAULTS = {
     "initial_outfit": "",
 }
 
-VERSION = "v1.1.1"
+VERSION = "v1.2.0"
 
 STYLE = """
 QDialog { background: #1b1c21; border: 1px solid #2b2c32; }
