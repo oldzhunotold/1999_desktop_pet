@@ -154,7 +154,7 @@ class ImportDialog(QDialog):
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
         self.resize(620, 520)
         self.setStyleSheet(
-            "QDialog{background:#1b1c21;color:#e6e6ea;}"
+            "QDialog{background:#1c1c1c;color:#e6e6ea;}"
             "QLabel{color:#e6e6ea;}"
             "QLineEdit{background:#2c2d34;border:1px solid #3a3b43;border-radius:6px;padding:5px;color:#fff;}"
             "QTableWidget{background:#232429;color:#e6e6ea;gridline-color:#3a3b43;border:none;}"

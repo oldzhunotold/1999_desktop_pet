@@ -31,26 +31,29 @@ DEFAULTS = {
     "auto_sleep": False,
     "sleep_minutes": 3,
     "wake_minutes": 10,
+    "throw_gravity": 1400,
+    "throw_decay": 0.90,
+    "throw_speed": 2600,
     "autostart": False,
     "always_on_top": True,
     "hide_fullscreen": True,
     "click_through_hidden_cursor": True,
     "allow_cross_screen": False,
-    "allow_offscreen": True,
+    "allow_offscreen": False,
     "initial_char": "",
     "initial_outfit": "",
 }
 
-VERSION = "v1.2.0"
+VERSION = "v1.2.1"
 
 STYLE = """
-QDialog { background: #1b1c21; border: 1px solid #2b2c32; }
+QDialog { background: #1c1c1c; border: 1px solid #2b2c32; }
 QWidget#titlebar { background: #17181c; }
 QLabel#winTitle { font-size: 14px; font-weight: bold; color: #f0f0f3; }
 QPushButton#closeBtn { background: transparent; border: none; color: #b9bac1; font-size: 15px; }
 QPushButton#closeBtn:hover { background: #3a2630; border-radius: 6px; color: #ff6b8a; }
 QWidget { color: #e6e6ea; font-family: "Microsoft YaHei"; font-size: 13px; }
-QListWidget { background: #1b1c21; border: none; outline: none; }
+QListWidget { background: #1c1c1c; border: none; outline: none; }
 QListWidget::item { padding: 9px 14px; border-radius: 8px; color: #b9bac1; }
 QListWidget::item:selected { background: #2a2b32; color: #ffffff; }
 QListWidget::item:hover { background: #24252b; }
@@ -78,9 +81,9 @@ QPushButton#resetBtn {
     padding: 8px 12px; color: #b9bac1; text-align: left;
 }
 QPushButton#resetBtn:hover { background: #24252b; }
-QScrollArea { border: none; background: #1b1c21; }
-QScrollArea > QWidget > QWidget { background: #1b1c21; }
-QStackedWidget { background: #1b1c21; }
+QScrollArea { border: none; background: #1c1c1c; }
+QScrollArea > QWidget > QWidget { background: #1c1c1c; }
+QStackedWidget { background: #1c1c1c; }
 """
 
 
@@ -127,7 +130,7 @@ def _row(title: str, desc: str, control: QWidget) -> QFrame:
 
 def _page(title: str):
     page = QWidget()
-    page.setStyleSheet("background: #1b1c21;")
+    page.setStyleSheet("background: #1c1c1c;")
     outer = QVBoxLayout(page)
     outer.setContentsMargins(24, 18, 24, 18)
     outer.setSpacing(10)
@@ -136,9 +139,9 @@ def _page(title: str):
     outer.addWidget(h)
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
-    scroll.setStyleSheet("background: #1b1c21; border: none;")
+    scroll.setStyleSheet("background: #1c1c1c; border: none;")
     inner = QWidget()
-    inner.setStyleSheet("background: #1b1c21;")
+    inner.setStyleSheet("background: #1c1c1c;")
     v = QVBoxLayout(inner)
     v.setContentsMargins(0, 6, 0, 6)
     v.setSpacing(8)
@@ -249,10 +252,10 @@ class SettingsDialog(QDialog):
             self.nav.addItem(name)
         left_lay.addWidget(self.nav, 1)
 
-        self.btn_save = QPushButton("保存")
-        self.btn_save.setObjectName("saveBtn")
-        self.btn_save.clicked.connect(self._save)
-        left_lay.addWidget(self.btn_save)
+        self.save_hint = QLabel("已自动保存")
+        self.save_hint.setObjectName("hint")
+        self.save_hint.setAlignment(Qt.AlignCenter)
+        left_lay.addWidget(self.save_hint)
 
         btn_reset = QPushButton("恢复默认")
         btn_reset.setObjectName("resetBtn")
@@ -333,7 +336,7 @@ class SettingsDialog(QDialog):
         oh.setContentsMargins(0, 0, 0, 0)
         oh.addStretch(1)
         self.allow_offscreen = ToggleSwitch()
-        self.allow_offscreen.setChecked(bool(values.get("allow_offscreen", True)))
+        self.allow_offscreen.setChecked(bool(values.get("allow_offscreen", False)))
         oh.addWidget(self.allow_offscreen)
         v.addWidget(
             _row(
@@ -455,6 +458,41 @@ class SettingsDialog(QDialog):
         self.wake_minutes.setValue(int(values.get("wake_minutes", 10)))
         v.addWidget(_row("睡多久醒来", "睡够这么久会自己醒来，回到待机。", self.wake_minutes))
 
+        self.throw_gravity = QSpinBox()
+        self.throw_gravity.setRange(0, 5000)
+        self.throw_gravity.setSingleStep(100)
+        self.throw_gravity.setSuffix(" px/s²")
+        self.throw_gravity.setValue(int(values.get("throw_gravity", 1400)))
+        v.addWidget(
+            _row(
+                "抛掷重力",
+                "甩出去后往下坠的强度；0 就是直线飞。",
+                self.throw_gravity,
+            )
+        )
+
+        self.throw_decay = QDoubleSpinBox()
+        self.throw_decay.setRange(0.50, 1.00)
+        self.throw_decay.setSingleStep(0.01)
+        self.throw_decay.setDecimals(2)
+        self.throw_decay.setValue(float(values.get("throw_decay", 0.90)))
+        v.addWidget(
+            _row(
+                "速度衰减",
+                "每帧保留多少速度，越小停得越快。",
+                self.throw_decay,
+            )
+        )
+
+        self.throw_speed = QSpinBox()
+        self.throw_speed.setRange(300, 6000)
+        self.throw_speed.setSingleStep(100)
+        self.throw_speed.setSuffix(" px/s")
+        self.throw_speed.setValue(int(values.get("throw_speed", 2600)))
+        v.addWidget(
+            _row("抛掷力度", "甩得再快，速度也最多放这么大。", self.throw_speed)
+        )
+
         v.addStretch(1)
         self.stack.addWidget(page)
 
@@ -478,6 +516,16 @@ class SettingsDialog(QDialog):
 
         self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
         self.nav.setCurrentRow(0)
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(700)
+        self._save_timer.timeout.connect(self._auto_save)
+        for w in self.findChildren(QSpinBox) + self.findChildren(QDoubleSpinBox):
+            w.valueChanged.connect(lambda *_: self._queue_save())
+        for w in (self.auto_sleep, self.autostart, self.always_on_top,
+                  self.hide_fullscreen, self.click_through, self.cross_screen,
+                  self.allow_offscreen):
+            w.toggled.connect(lambda *_: self._queue_save())
         self._ready = True
 
     def mousePressEvent(self, event):
@@ -519,10 +567,13 @@ class SettingsDialog(QDialog):
             idx = self.outfit_combo.findData("Default")
         self.outfit_combo.setCurrentIndex(max(0, idx))
 
-    def _save(self):
+    def _queue_save(self):
+        self.save_hint.setText("保存中…")
+        self._save_timer.start()
+
+    def _auto_save(self):
         self._on_apply(self._collect())
-        self.btn_save.setText("已保存")
-        QTimer.singleShot(1200, lambda: self.btn_save.setText("保存"))
+        self.save_hint.setText("已自动保存")
 
     def _collect(self) -> dict:
         return {
@@ -533,6 +584,9 @@ class SettingsDialog(QDialog):
             "auto_sleep": self.auto_sleep.isChecked(),
             "sleep_minutes": self.sleep_minutes.value(),
             "wake_minutes": self.wake_minutes.value(),
+            "throw_gravity": self.throw_gravity.value(),
+            "throw_decay": round(self.throw_decay.value(), 2),
+            "throw_speed": self.throw_speed.value(),
             "autostart": self.autostart.isChecked(),
             "always_on_top": self.always_on_top.isChecked(),
             "hide_fullscreen": self.hide_fullscreen.isChecked(),
@@ -557,6 +611,9 @@ class SettingsDialog(QDialog):
         self.allow_offscreen.setChecked(DEFAULTS["allow_offscreen"])
         self.sleep_minutes.setValue(DEFAULTS["sleep_minutes"])
         self.wake_minutes.setValue(DEFAULTS["wake_minutes"])
+        self.throw_gravity.setValue(DEFAULTS["throw_gravity"])
+        self.throw_decay.setValue(DEFAULTS["throw_decay"])
+        self.throw_speed.setValue(DEFAULTS["throw_speed"])
 
     def accept(self):
         self._on_apply(self._collect())

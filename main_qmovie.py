@@ -11,6 +11,7 @@ import json
 import os
 import random
 import sys
+import time
 
 import autostart
 import bubble as bubble_mod
@@ -184,6 +185,9 @@ IDLE_SLEEP_MS = int(SETTINGS.get("sleep_minutes", 3)) * 60 * 1000
 IDLE_SHOW_MS = int(SETTINGS.get("show_seconds", 90)) * 1000
 AUTO_SLEEP = bool(SETTINGS.get("auto_sleep", False))
 WAKE_MS = int(SETTINGS.get("wake_minutes", 10)) * 60 * 1000
+THROW_GRAVITY = float(SETTINGS.get("throw_gravity", 1400))
+THROW_DECAY = float(SETTINGS.get("throw_decay", 0.90))
+THROW_SPEED = float(SETTINGS.get("throw_speed", 2600))
 bubble_mod.CHAR_MS = int(SETTINGS.get("char_ms", bubble_mod.CHAR_MS))
 bubble_mod.HOLD_MS = int(SETTINGS.get("hold_ms", bubble_mod.HOLD_MS))
 
@@ -195,7 +199,7 @@ ALWAYS_ON_TOP = bool(SETTINGS.get("always_on_top", True))
 HIDE_FULLSCREEN = bool(SETTINGS.get("hide_fullscreen", True))
 CLICK_THROUGH_HIDDEN = bool(SETTINGS.get("click_through_hidden_cursor", True))
 ALLOW_CROSS_SCREEN = bool(SETTINGS.get("allow_cross_screen", False))
-ALLOW_OFFSCREEN = bool(SETTINGS.get("allow_offscreen", True))
+ALLOW_OFFSCREEN = bool(SETTINGS.get("allow_offscreen", False))
 CHAR_LABELS = {
     "noire": "菲林士多",
     "marcus": "马库斯",
@@ -407,8 +411,10 @@ class Pet(QWidget):
         # 先用 idle 的尺寸定窗口，避免第一帧还没解码时窗口是 0×0
         reader = QImageReader(os.path.join(self.asset_dir, "idle.webp"))
         sz = reader.size()
-        w = max(1, int(sz.width() * SCALE)) if sz.isValid() else 307
-        h = max(1, int(sz.height() * SCALE)) if sz.isValid() else 307
+        self._base_w = sz.width() if sz.isValid() else 307
+        self._base_h = sz.height() if sz.isValid() else 307
+        w = max(1, int(self._base_w * SCALE))
+        h = max(1, int(self._base_h * SCALE))
         # 不再给 QMovie 设 scaledSize（切动作时会被重置、导致“突然变大”），
         # 改成让 QLabel 把每一帧缩放到固定尺寸
         self.setFixedSize(w, h)
@@ -424,6 +430,19 @@ class Pet(QWidget):
         self.idle_timer.timeout.connect(self._fall_asleep)
         if AUTO_SLEEP:
             self.idle_timer.start(IDLE_SLEEP_MS)
+
+        self._throw_timer = QTimer(self)
+        self._throw_timer.setInterval(16)
+        self._throw_timer.timeout.connect(self._throw_tick)
+        self._throw_vx = 0.0
+        self._throw_vy = 0.0
+        self._samples = []
+
+        self._top_timer = QTimer(self)
+        self._top_timer.setInterval(4000)
+        self._top_timer.timeout.connect(self._check_topmost)
+        if ALWAYS_ON_TOP:
+            self._top_timer.start()
 
         self.wake_timer = QTimer(self)
         self.wake_timer.setSingleShot(True)
@@ -728,6 +747,8 @@ class Pet(QWidget):
                 self.play("posture")
             self._press_pos = event.globalPosition().toPoint()
             self._drag_screen = self.screen()
+            self._samples = [(time.perf_counter(), self._press_pos)]
+            self._throw_timer.stop()
             self._dragging = False
             event.accept()
 
@@ -763,6 +784,9 @@ class Pet(QWidget):
                         )
                 self.move(new_pos)
                 self._press_pos = pos
+                self._samples.append((time.perf_counter(), pos))
+                if len(self._samples) > 6:
+                    self._samples.pop(0)
                 self.idle_timer.start(IDLE_SLEEP_MS)
                 event.accept()
 
@@ -773,8 +797,114 @@ class Pet(QWidget):
             self._queue_talk(2)
         elif event.button() == Qt.LeftButton and was_drag:
             self.play("idle")
+            self._start_throw()
         self._dragging = False
         event.accept()
+
+    # ---------- 置顶看门狗 / 缩放 / 抛掷 ----------
+    def _check_topmost(self):
+        if not ALWAYS_ON_TOP or not self.isVisible() or self._hidden_by_fullscreen:
+            return
+        if not (self.windowFlags() & Qt.WindowStaysOnTopHint):
+            return
+        if _user32 is None:
+            return
+        try:
+            SWP_NOMOVE = 0x0002
+            SWP_NOSIZE = 0x0001
+            SWP_NOACTIVATE = 0x0010
+            _user32.SetWindowPos(
+                int(self.winId()),
+                -1,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+        except Exception:
+            pass
+
+    def _zoom_by(self, step: float):
+        global SCALE
+        new = max(0.2, min(1.5, round(SCALE + step, 2)))
+        if abs(new - SCALE) < 1e-6:
+            return
+        geo = self.frameGeometry()
+        cx = geo.center().x()
+        bottom = geo.bottom()
+        SCALE = new
+        w = max(1, int(self._base_w * SCALE))
+        h = max(1, int(self._base_h * SCALE))
+        self.setFixedSize(w, h)
+        self.label.setFixedSize(w, h)
+        self.move(cx - w // 2, bottom - h + 1)
+        SETTINGS["scale"] = round(SCALE, 2)
+        settings_ui.save(SETTINGS_PATH, SETTINGS)
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return
+        self._zoom_by(0.05 if delta > 0 else -0.05)
+        event.accept()
+
+    def _start_throw(self):
+        if len(self._samples) < 2:
+            return
+        t0, p0 = self._samples[0]
+        t1, p1 = self._samples[-1]
+        dt = max(0.001, t1 - t0)
+        vx = (p1.x() - p0.x()) / dt
+        vy = (p1.y() - p0.y()) / dt
+        speed = (vx * vx + vy * vy) ** 0.5
+        if speed < 350:
+            return
+        cap = THROW_SPEED
+        if speed > cap:
+            vx *= cap / speed
+            vy *= cap / speed
+        self._throw_vx = vx
+        self._throw_vy = vy
+        self._throw_timer.start()
+
+    def _throw_tick(self):
+        if self._dragging:
+            self._throw_timer.stop()
+            return
+        dt = 0.016
+        x = self.x() + self._throw_vx * dt
+        y = self.y() + self._throw_vy * dt
+        area = self.screen().availableGeometry()
+        margin = 40 if ALLOW_OFFSCREEN else 0
+        if ALLOW_OFFSCREEN:
+            minx = area.left() - self.width() + margin
+            maxx = area.right() - margin
+            miny = area.top() - self.height() + margin
+            maxy = area.bottom() - margin
+        else:
+            minx = area.left()
+            maxx = area.right() - self.width()
+            miny = area.top()
+            maxy = area.bottom() - self.height()
+        if x < minx:
+            x = minx
+            self._throw_vx = abs(self._throw_vx) * 0.45
+        elif x > maxx:
+            x = maxx
+            self._throw_vx = -abs(self._throw_vx) * 0.45
+        if y < miny:
+            y = miny
+            self._throw_vy = abs(self._throw_vy) * 0.45
+        elif y > maxy:
+            y = maxy
+            self._throw_vy = -abs(self._throw_vy) * 0.45
+        self._throw_vy += THROW_GRAVITY * dt
+        self._throw_vx *= THROW_DECAY
+        self._throw_vy *= THROW_DECAY
+        self.move(int(x), int(y))
+        if abs(self._throw_vx) < 30 and abs(self._throw_vy) < 30:
+            self._throw_timer.stop()
 
     # ---------- 托盘 ----------
     def _make_tray(self):
@@ -917,8 +1047,11 @@ class Pet(QWidget):
         IDLE_SLEEP_MS = int(data.get("sleep_minutes", 3)) * 60 * 1000
         IDLE_SHOW_MS = int(data.get("show_seconds", 90)) * 1000
         AUTO_SLEEP = bool(data.get("auto_sleep", False))
-        global WAKE_MS
+        global WAKE_MS, THROW_GRAVITY, THROW_DECAY, THROW_SPEED
         WAKE_MS = int(data.get("wake_minutes", 10)) * 60 * 1000
+        THROW_GRAVITY = float(data.get("throw_gravity", THROW_GRAVITY))
+        THROW_DECAY = float(data.get("throw_decay", THROW_DECAY))
+        THROW_SPEED = float(data.get("throw_speed", THROW_SPEED))
         if "autostart" in data:
             autostart.set_enabled(bool(data["autostart"]))
         if "always_on_top" in data:
